@@ -9,186 +9,358 @@ class SVM:
         degree=3,
         max_iter=100,
         tol=1e-3,
+        random_state=None,
     ):
         self.C = float(C)
         self.kernel = kernel
         self.gamma = float(gamma)
         self.degree = int(degree)
-        self.max_iter = max_iter
-        self.tol = tol
+        self.max_iter = int(max_iter)
+        self.tol = float(tol)
+        self.random_state = random_state
 
-        self.classes_: np.ndarray | None = None
+        self.classes_ = None
         self.models_ = {}
+        self.rng_ = None
 
     def _linear_kernel(self, X1, X2):
-        return np.dot(X1, X2.T)
+        return X1 @ X2.T
 
     def _polynomial_kernel(self, X1, X2):
-        return (self.gamma * np.dot(X1, X2.T) + 1.0) ** self.degree
+        return (
+            self.gamma * (X1 @ X2.T) + 1.0
+        ) ** self.degree
 
     def _rbf_kernel(self, X1, X2):
-        X1_norm_sq = np.sum(X1**2, axis=1, keepdims=True)
-        X2_norm_sq = np.sum(X2**2, axis=1, keepdims=True)
-        dist_sq = X1_norm_sq + X2_norm_sq.T - 2.0 * np.dot(X1, X2.T)
-        return np.exp(-self.gamma * dist_sq)
+        X1_norm = np.sum(X1 ** 2, axis=1, keepdims=True)
+        X2_norm = np.sum(X2 ** 2, axis=1, keepdims=True)
+
+        dist = (
+            X1_norm
+            + X2_norm.T
+            - 2.0 * (X1 @ X2.T)
+        )
+
+        dist = np.maximum(dist, 0.0)
+
+        return np.exp(-self.gamma * dist)
 
     def _kernel(self, X1, X2):
         if self.kernel == "linear":
             return self._linear_kernel(X1, X2)
-        elif self.kernel == "poly":
+
+        if self.kernel == "poly":
             return self._polynomial_kernel(X1, X2)
-        elif self.kernel == "rbf":
+
+        if self.kernel == "rbf":
             return self._rbf_kernel(X1, X2)
-        else:
-            raise ValueError(f"Kernel '{self.kernel}' khong hop le.")
+
+        raise ValueError(
+            "kernel must be 'linear', 'poly', or 'rbf'."
+        )
 
     def _fit_binary(self, X, y):
-        n_samples, n_features = X.shape
+        n_samples = X.shape[0]
+
         alpha = np.zeros(n_samples)
         b = 0.0
 
         K = self._kernel(X, X)
 
         passes = 0
+
         while passes < self.max_iter:
-            num_changed_alphas = 0
+            changed = 0
 
             for i in range(n_samples):
-                f_xi = np.sum(alpha * y * K[:, i]) + b
-                E_i = f_xi - y[i]
+                f_i = np.sum(
+                    alpha * y * K[:, i]
+                ) + b
 
-                if (y[i] * E_i < -self.tol and alpha[i] < self.C) or (
-                    y[i] * E_i > self.tol and alpha[i] > 0
-                ):
-                    j = np.random.choice([idx for idx in range(n_samples) if idx != i])
+                E_i = f_i - y[i]
 
-                    f_xj = np.sum(alpha * y * K[:, j]) + b
-                    E_j = f_xj - y[j]
+                condition = (
+                    y[i] * E_i < -self.tol
+                    and alpha[i] < self.C
+                ) or (
+                    y[i] * E_i > self.tol
+                    and alpha[i] > 0
+                )
 
-                    alpha_i_old = alpha[i]
-                    alpha_j_old = alpha[j]
+                if not condition:
+                    continue
 
-                    if y[i] != y[j]:
-                        L = max(0.0, alpha[j] - alpha[i])
-                        H = min(self.C, self.C + alpha[j] - alpha[i])
-                    else:
-                        L = max(0.0, alpha[i] + alpha[j] - self.C)
-                        H = min(self.C, alpha[i] + alpha[j])
+                candidates = np.arange(n_samples)
+                candidates = candidates[candidates != i]
 
-                    if L == H: continue
+                j = self.rng_.choice(candidates)
 
-                    eta = 2.0 * K[i, j] - K[i, i] - K[j, j]
-                    if eta >= 0: continue
+                f_j = np.sum(
+                    alpha * y * K[:, j]
+                ) + b
 
-                    alpha[j] = alpha_j_old - (y[j] * (E_i - E_j)) / eta
+                E_j = f_j - y[j]
 
-                    if alpha[j] > H: alpha[j] = H
-                    elif alpha[j] < L: alpha[j] = L
+                alpha_i_old = alpha[i]
+                alpha_j_old = alpha[j]
 
-                    if abs(alpha[j] - alpha_j_old) < 1e-5: continue
-
-                    alpha[i] = alpha_i_old + y[i] * y[j] * (alpha_j_old - alpha[j])
-
-                    b1 = (
-                        b
-                        - E_i
-                        - y[i] * (alpha[i] - alpha_i_old) * K[i, i]
-                        - y[j] * (alpha[j] - alpha_j_old) * K[i, j]
+                if y[i] != y[j]:
+                    L = max(
+                        0.0,
+                        alpha[j] - alpha[i]
                     )
-                    b2 = (
-                        b
-                        - E_j
-                        - y[i] * (alpha[i] - alpha_i_old) * K[i, j]
-                        - y[j] * (alpha[j] - alpha_j_old) * K[j, j]
+                    H = min(
+                        self.C,
+                        self.C + alpha[j] - alpha[i]
+                    )
+                else:
+                    L = max(
+                        0.0,
+                        alpha[i] + alpha[j] - self.C
+                    )
+                    H = min(
+                        self.C,
+                        alpha[i] + alpha[j]
                     )
 
-                    if 0 < alpha[i] < self.C: b = b1
-                    elif 0 < alpha[j] < self.C: b = b2
-                    else: b = (b1 + b2) / 2.0
+                if L == H:
+                    continue
 
-                    num_changed_alphas += 1
+                eta = (
+                    2.0 * K[i, j]
+                    - K[i, i]
+                    - K[j, j]
+                )
 
-            if num_changed_alphas == 0: passes += 1
-            else: passes = 0
+                if eta >= 0:
+                    continue
 
-        sv_indices = alpha > 1e-5
-        model = {
-            "alpha": alpha[sv_indices],
-            "support_vectors": X[sv_indices],
-            "support_vector_labels": y[sv_indices],
+                alpha[j] = (
+                    alpha_j_old
+                    - y[j] * (E_i - E_j) / eta
+                )
+
+                alpha[j] = np.clip(
+                    alpha[j],
+                    L,
+                    H
+                )
+
+                if abs(
+                    alpha[j] - alpha_j_old
+                ) < 1e-5:
+                    continue
+
+                alpha[i] = (
+                    alpha_i_old
+                    + y[i] * y[j]
+                    * (alpha_j_old - alpha[j])
+                )
+
+                b1 = (
+                    b
+                    - E_i
+                    - y[i]
+                    * (alpha[i] - alpha_i_old)
+                    * K[i, i]
+                    - y[j]
+                    * (alpha[j] - alpha_j_old)
+                    * K[i, j]
+                )
+
+                b2 = (
+                    b
+                    - E_j
+                    - y[i]
+                    * (alpha[i] - alpha_i_old)
+                    * K[i, j]
+                    - y[j]
+                    * (alpha[j] - alpha_j_old)
+                    * K[j, j]
+                )
+
+                if 0 < alpha[i] < self.C:
+                    b = b1
+                elif 0 < alpha[j] < self.C:
+                    b = b2
+                else:
+                    b = (b1 + b2) / 2.0
+
+                changed += 1
+
+            if changed == 0:
+                passes += 1
+            else:
+                passes = 0
+
+        sv = alpha > 1e-5
+
+        free_sv = (
+            (alpha > 1e-5)
+            & (alpha < self.C - 1e-5)
+        )
+
+        if np.any(free_sv):
+            k = np.where(free_sv)[0][0]
+
+            b = (
+                y[k]
+                - np.sum(
+                    alpha[sv]
+                    * y[sv]
+                    * K[sv, k]
+                )
+            )
+
+        return {
+            "alpha": alpha[sv],
+            "support_vectors": X[sv],
+            "support_vector_labels": y[sv],
             "b": b,
         }
-        return model
 
-    # =========================================================
-    # 3. DECISION FUNCTION
-    # f(x) = sum_{sv} (alpha_k * y_k * K(x_sv, x)) + b
-    # =========================================================
+    def fit(self, X, y):
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y).ravel()
+
+        if X.ndim != 2:
+            raise ValueError(
+                "X must be a 2-dimensional array."
+            )
+
+        if y.ndim != 1:
+            raise ValueError(
+                "y must be a 1-dimensional array."
+            )
+
+        if X.shape[0] != y.shape[0]:
+            raise ValueError(
+                "X and y must have the same number of samples."
+            )
+
+        if X.shape[0] < 2:
+            raise ValueError(
+                "SVM requires at least 2 samples."
+            )
+
+        if self.C <= 0:
+            raise ValueError(
+                "C must be greater than 0."
+            )
+
+        if self.gamma <= 0:
+            raise ValueError(
+                "gamma must be greater than 0."
+            )
+
+        if self.degree <= 0:
+            raise ValueError(
+                "degree must be greater than 0."
+            )
+
+        if self.max_iter <= 0:
+            raise ValueError(
+                "max_iter must be greater than 0."
+            )
+
+        if self.tol <= 0:
+            raise ValueError(
+                "tol must be greater than 0."
+            )
+
+        self.classes_ = np.unique(y)
+
+        if len(self.classes_) < 2:
+            raise ValueError(
+                "SVM requires at least 2 classes."
+            )
+
+        self.rng_ = np.random.default_rng(
+            self.random_state
+        )
+
+        self.models_ = {}
+
+        for cls in self.classes_:
+            y_binary = np.where(
+                y == cls,
+                1.0,
+                -1.0
+            )
+
+            self.models_[cls] = self._fit_binary(
+                X,
+                y_binary
+            )
+
+        return self
 
     def _decision_function_binary(self, X, model):
         alpha = model["alpha"]
-        sv = model["support_vectors"]
-        sv_y = model["support_vector_labels"]
+        support_vectors = model["support_vectors"]
+        support_labels = model["support_vector_labels"]
         b = model["b"]
 
         if len(alpha) == 0:
             return np.zeros(X.shape[0])
 
-        # K_test có kích thước: (n_test, n_support_vectors)
-        K_test = self._kernel(X, sv)
-        # Điểm quyết định: f(x) = sum_k (alpha_k * y_k * K(x, x_k)) + b
-        score = np.dot(K_test, alpha * sv_y) + b
-        return score
+        K = self._kernel(
+            X,
+            support_vectors
+        )
 
-    # =========================================================
-    # 4. MULTICLASS: ONE-VS-REST (OvR)
-    # =========================================================
-
-    def fit(self, X, y):
-        """Huấn luyện bộ phân loại SVM đa lớp theo cơ chế One-vs-Rest."""
-        X = np.asarray(X, dtype=float)
-        y = np.asarray(y).ravel()
-        self.classes_ = np.unique(y)
-        self.models_ = {}
-
-        for cls in self.classes_:
-            # Biến đổi nhãn: class hiện tại thành +1, các class còn lại thành -1
-            y_binary = np.where(y == cls, 1.0, -1.0)
-            model = self._fit_binary(X, y_binary)
-            self.models_[cls] = model
-
-        return self
+        return (
+            K @ (alpha * support_labels)
+            + b
+        )
 
     def decision_function(self, X):
-        """Tính điểm quyết định của từng lớp đối với từng mẫu dữ liệu."""
-        if self.classes_ is None: raise ValueError()
+        if self.classes_ is None:
+            raise ValueError(
+                "SVM has not been fitted yet."
+            )
 
-        classes = self.classes_
-        X = np.asarray(X, dtype=float)
+        X = np.asarray(X, dtype=np.float64)
+
         if X.ndim == 1:
             X = X.reshape(1, -1)
-        n_samples = X.shape[0]
-        n_classes = len(classes)
-        scores = np.zeros((n_samples, n_classes))
 
-        for idx, cls in enumerate(classes):
-            scores[:, idx] = self._decision_function_binary(X, self.models_[cls])
+        if X.ndim != 2:
+            raise ValueError(
+                "X must be a 2-dimensional array."
+            )
+
+        scores = np.zeros(
+            (X.shape[0], len(self.classes_))
+        )
+
+        for i, cls in enumerate(self.classes_):
+            scores[:, i] = (
+                self._decision_function_binary(
+                    X,
+                    self.models_[cls]
+                )
+            )
 
         return scores
 
     def predict(self, X):
-        """Dự đoán nhãn lớp có giá trị hàm quyết định lớn nhất: argmax_c f_c(x)."""
-        if self.classes_ is None: raise ValueError()
-
-        classes = self.classes_
         scores = self.decision_function(X)
-        best_class_indices = np.argmax(scores, axis=1)
-        return classes[best_class_indices]
+
+        indices = np.argmax(
+            scores,
+            axis=1
+        )
+
+        return self.classes_[indices]
 
     def score(self, X, y):
-        """Tính độ chính xác (Accuracy)."""
         y = np.asarray(y).ravel()
         y_pred = self.predict(X)
-        if len(y) != len(y_pred):
-            raise ValueError()
-        return np.mean(y_pred == y)
+
+        if y.shape != y_pred.shape:
+            raise ValueError(
+                "y and predictions must have the same shape."
+            )
+
+        return np.mean(y == y_pred)
