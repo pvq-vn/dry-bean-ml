@@ -27,22 +27,13 @@ class SVM:
         return X1 @ X2.T
 
     def _polynomial_kernel(self, X1, X2):
-        return (
-            self.gamma * (X1 @ X2.T) + 1.0
-        ) ** self.degree
+        return (self.gamma * (X1 @ X2.T) + 1.0) ** self.degree
 
     def _rbf_kernel(self, X1, X2):
         X1_norm = np.sum(X1 ** 2, axis=1, keepdims=True)
         X2_norm = np.sum(X2 ** 2, axis=1, keepdims=True)
-
-        dist = (
-            X1_norm
-            + X2_norm.T
-            - 2.0 * (X1 @ X2.T)
-        )
-
+        dist = X1_norm + X2_norm.T - 2.0 * (X1 @ X2.T)
         dist = np.maximum(dist, 0.0)
-
         return np.exp(-self.gamma * dist)
 
     def _kernel(self, X1, X2):
@@ -55,20 +46,15 @@ class SVM:
         if self.kernel == "rbf":
             return self._rbf_kernel(X1, X2)
 
-        raise ValueError(
-            "kernel must be 'linear', 'poly', or 'rbf'."
-        )
+        raise ValueError()
 
     def _fit_binary(self, X, y):
         n_samples = X.shape[0]
-
         alpha = np.zeros(n_samples)
         b = 0.0
-
         K = self._kernel(X, X)
 
         passes = 0
-
         while passes < self.max_iter:
             changed = 0
 
