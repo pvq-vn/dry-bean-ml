@@ -9,6 +9,7 @@ class NeuralNetwork:
         epochs=100,
         batch_size=32,
         dropout_rate=0.0,
+        l2_lambda=0.0,
         random_state=None,
     ):
         self.layer_sizes = layer_sizes
@@ -18,15 +19,22 @@ class NeuralNetwork:
         self.batch_size = int(batch_size)
         self.dropout_rate = float(dropout_rate)
         self.random_state = random_state
+        self.l2_lambda = float(l2_lambda)
 
         if self.random_state is not None:
             np.random.seed(self.random_state)
 
         self.weights = []
         self.biases = []
-        self._init_parameters()
 
-        self.history = {"loss": [], "accuracy": []}
+        self.history = {
+            "loss": [],
+            "accuracy": [],
+            "val_loss": [],
+            "val_accuracy": [],
+        }
+
+        self._init_parameters()
 
     def _init_parameters(self):
         num_layers = len(self.layer_sizes)
@@ -66,11 +74,17 @@ class NeuralNetwork:
         exp_Z = np.exp(Z_shifted)
         return exp_Z / np.sum(exp_Z, axis=1, keepdims=True)
 
-    def _loss(self, y_true_one_hot, y_pred_prob):
+    def _loss(self, y_true_one_hot, y_pred_prob, include_regularization=True):
         n_samples = y_true_one_hot.shape[0]
         eps = 1e-15
         prob_clipped = np.clip(y_pred_prob, eps, 1.0 - eps)
-        return -np.sum(y_true_one_hot * np.log(prob_clipped)) / n_samples
+        cross_entropy = -np.sum(y_true_one_hot * np.log(prob_clipped)) / n_samples
+        
+        if include_regularization:
+            l2 = 0.5 * self.l2_lambda * sum(np.sum(W ** 2) for W in self.weights)
+            return cross_entropy + l2
+
+        return cross_entropy
 
     def _dropout(self, A, training=True):
         if not training or self.dropout_rate <= 0.0:
@@ -123,6 +137,7 @@ class NeuralNetwork:
             A_prev = cache["A"][l]
 
             dW = np.dot(A_prev.T, e) / n_samples
+            dW += self.l2_lambda * self.weights[l]
             db = np.sum(e, axis=0, keepdims=True) / n_samples
 
             gradients["dW"].insert(0, dW)
@@ -147,16 +162,35 @@ class NeuralNetwork:
             self.biases[l] -= self.learning_rate * gradients["db"][l]
 
     def _one_hot_encode(self, y, num_classes):
+        y = np.asarray(y).ravel()
         one_hot = np.zeros((len(y), num_classes))
         one_hot[np.arange(len(y)), y] = 1.0
         return one_hot
 
-    def fit(self, X, y):
+    def fit(self, X, y, X_val=None, y_val=None):
+        self.history = {
+            "loss": [],
+            "accuracy": [],
+            "val_loss": [],
+            "val_accuracy": [],
+        }
+
+        X = np.asarray(X)
+        y = np.asarray(y).ravel()
+
         num_classes = self.layer_sizes[-1]
         y_one_hot = self._one_hot_encode(y, num_classes)
         n_samples = X.shape[0]
 
-        for epoch in range(self.epochs):
+        has_val = X_val is not None and y_val is not None
+        y_val_one_hot = None
+
+        if has_val:
+            X_val = np.asarray(X_val)
+            y_val = np.asarray(y_val).ravel()
+            y_val_one_hot = self._one_hot_encode(y_val, num_classes)
+
+        for _ in range(self.epochs):
             indices = np.arange(n_samples)
             np.random.shuffle(indices)
             X_shuffled = X[indices]
@@ -172,11 +206,18 @@ class NeuralNetwork:
                 self._update_parameters(gradients)
 
             y_pred_prob, _ = self._forward(X, training=False)
-            current_loss = self._loss(y_one_hot, y_pred_prob)
-            current_acc = self.score(X, y)
+            current_loss = self._loss(y_one_hot, y_pred_prob, include_regularization=True)
+            current_acc = np.mean(np.argmax(y_pred_prob, axis=1) == y)
 
             self.history["loss"].append(current_loss)
             self.history["accuracy"].append(current_acc)
+
+            if has_val and y_val_one_hot is not None:
+                val_pred_prob, _ = self._forward(X_val, training=False)
+                val_loss = self._loss(y_val_one_hot, val_pred_prob, include_regularization=False)
+                val_acc = np.mean(np.argmax(val_pred_prob, axis=1) == y_val)
+                self.history["val_loss"].append(val_loss)
+                self.history["val_accuracy"].append(val_acc)
 
         return self
 
@@ -191,4 +232,22 @@ class NeuralNetwork:
     def score(self, X, y):
         y_pred = self.predict(X)
         return np.mean(y_pred == y)
+
+    def get_params(self, deep=True):
+        return {
+            "layer_sizes": self.layer_sizes,
+            "activation": self.activation,
+            "learning_rate": self.learning_rate,
+            "epochs": self.epochs,
+            "batch_size": self.batch_size,
+            "dropout_rate": self.dropout_rate,
+            "l2_lambda": self.l2_lambda,
+            "random_state": self.random_state,
+        }
+
+    def set_params(self, **params):
+        for key, value in params.items():
+            setattr(self, key, value)
+
+        return self
         
